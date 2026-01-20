@@ -9,6 +9,9 @@ app = Flask(__name__)
 CORS(app)
 
 model = YOLO("yolov8n.pt")
+@app.route("/")
+def home():
+    return "Intelligent Navigation Aid API is running"
 
 def find_direction(x_center, frame_w):
     if x_center < frame_w * 0.33:
@@ -60,3 +63,4 @@ def detect():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
