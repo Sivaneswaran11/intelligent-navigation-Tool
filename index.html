@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Intelligent Navigation Aid</title>
+
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
+
+  <style>
+  :root{
+    --bg:#0b0f14;
+    --card:#121a24cc;
+    --accent:#00eaff;
+    --danger:#ff4d6d;
+    --warn:#ffb703;
+    --ok:#00ff9c;
+    --text:#e9f1ff;
+  }
+
+  body{
+    margin:0;
+    min-height:100vh;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #0f2a3a 0%, transparent 40%),
+      radial-gradient(900px 500px at 110% 10%, #1b1038 0%, transparent 40%),
+      var(--bg);
+    color:var(--text);
+    font-family:'Poppins',system-ui,Segoe UI,Arial;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+
+  .app{
+    width:100%;
+    max-width:440px;
+    padding:16px;
+  }
+
+  .header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:12px;
+  }
+  .header h1{
+    font-size:22px;
+    letter-spacing:.4px;
+    color:var(--accent);
+    text-shadow:0 0 12px #00eaff55;
+  }
+  .badge{
+    padding:6px 10px;
+    border-radius:999px;
+    font-size:12px;
+    background:#223;
+    border:1px solid #2b3b4f;
+  }
+  .badge.active{background:#002b2b;border-color:#00eaff;color:#9ff}
+
+  .card{
+    background:linear-gradient(180deg,#162030aa,#0f1620aa), var(--card);
+    backdrop-filter: blur(10px);
+    border:1px solid #203246;
+    border-radius:16px;
+    box-shadow:0 20px 40px #0006, inset 0 1px 0 #fff1;
+  }
+
+  .camera{
+    position:relative;
+    overflow:hidden;
+  }
+  .camera video, .camera canvas{
+    width:100%;
+    display:block;
+    border-radius:16px;
+  }
+  .glow.active{
+    position:absolute; inset:0;
+    box-shadow:0 0 0 2px #00eaff55 inset, 0 0 24px #00eaff66;
+    pointer-events:none;
+  }
+
+  .info{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+    margin-top:12px;
+  }
+  .info .item{
+    padding:12px;
+    border-radius:12px;
+    background:#0d1520;
+    border:1px solid #22324a;
+  }
+  .item b{display:block;font-size:12px;color:#9bb}
+  .item span{font-size:18px}
+
+  .controls{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+    margin-top:12px;
+  }
+  .controls .wide{grid-column:1/-1}
+
+  button{
+    appearance:none;
+    border:none;
+    border-radius:14px;
+    padding:14px 16px;
+    font-size:16px;
+    font-weight:600;
+    cursor:pointer;
+    color:#04141a;
+    background:linear-gradient(180deg,#7ffcff,#00eaff);
+    box-shadow:0 8px 18px #00eaff55;
+  }
+  button.secondary{
+    background:linear-gradient(180deg,#ffd166,#ffb703);
+    box-shadow:0 8px 18px #ffb70355;
+  }
+  button.danger{
+    background:linear-gradient(180deg,#ff7a9a,#ff4d6d);
+    box-shadow:0 8px 18px #ff4d6d55;
+    color:#fff;
+  }
+  button:active{transform:translateY(1px)}
+
+  .status{
+    margin-top:12px;
+    padding:12px;
+    text-align:center;
+    border-radius:12px;
+    background:#0b1220;
+    border:1px dashed #2b3b4f;
+  }
+
+  #log{
+    margin-top:10px;
+    max-height:120px;
+    overflow:auto;
+    font-size:12px;
+    color:#8aa;
+    background:#0a111b;
+    border-radius:10px;
+    padding:8px;
+    border:1px solid #1d2a3c;
+  }
+  </style>
+</head>
+
+<body>
+<div class="app">
+  <div class="header">
+    <h1>Intelligent Navigation Tool</h1>
+    
+    <span id="scanBadge" class="badge">Idle</span>
+  </div>
+
+  <div class="card camera">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+    <div id="glow" class="glow"></div>
+  </div>
+
+  <div class="info">
+    <div class="item"><b>Target</b><span id="uiTarget">—</span></div>
+    <div class="item"><b>Status</b><span id="uiStatus">Waiting</span></div>
+  </div>
+
+  <div class="controls">
+    <button id="start-voice" class="wide">🎤 Speak Object</button>
+    <button id="start-scan">▶ Start</button>
+    <button id="stop-scan" class="danger">⏹ Stop</button>
+  </div>
+
+  <div id="status-box" class="status">Say an object name</div>
+  <pre id="log"></pre>
+</div>
+
+<script>
+let lastFoundTime = Date.now();
+async function startCamera() {
+  const video = document.getElementById("video");
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  video.srcObject = stream;
+}
+startCamera();
+
+let targetObject = "";
+let scanning = false;
+let intervalId = null;
+let cooldown = false;
+
+function speak(text){
+  window.speechSynthesis.cancel();
+  let msg = new SpeechSynthesisUtterance(text);
+  msg.lang = "en-US";
+  window.speechSynthesis.speak(msg);
+}
+
+function setScanningUI(on){
+  const b=document.getElementById("scanBadge");
+  const g=document.getElementById("glow");
+  if(on){
+    b.textContent="Scanning";
+    b.classList.add("active");
+    g.classList.add("active");
+    document.getElementById("uiStatus").innerText="Scanning";
+  }else{
+    b.textContent="Idle";
+    b.classList.remove("active");
+    g.classList.remove("active");
+    document.getElementById("uiStatus").innerText="Stopped";
+  }
+}
+
+document.getElementById("start-voice").onclick = () => {
+  let rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+  rec.lang = "en-US";
+  rec.start();
+
+  rec.onresult = (event) => {
+    let raw = event.results[0][0].transcript.toLowerCase().trim();
+    console.log("VOICE:", raw);
+
+    // Remove wake words
+    let command = raw
+      .replace("assistant", "")
+      .replace("tool", "")
+      .replace("please", "")
+      .trim();
+
+    // STOP commands
+    if (
+      command === "stop" ||
+      command.includes("stop scanning") ||
+      command.includes("halt") ||
+      command.includes("pause")
+    ) {
+      stopScanning();
+      speak("Scanning stopped");
+      return;
+    }
+
+    // START commands
+    if (
+      command === "start" ||
+      command.includes("start scanning") ||
+      command.includes("begin") ||
+      command.includes("scan")
+    ) {
+      if (!targetObject) {
+        speak("Please tell me which object to find");
+        return;
+      }
+      speak("Starting scan for " + targetObject);
+      startScanning();
+      return;
+    }
+
+    // FIND OBJECT patterns
+    if (
+      command.startsWith("find ") ||
+      command.startsWith("search ") ||
+      command.startsWith("look for ")
+    ) {
+      targetObject = command
+        .replace("find", "")
+        .replace("search", "")
+        .replace("look for", "")
+        .trim();
+
+      document.getElementById("uiTarget").innerText = targetObject;
+      document.getElementById("status-box").innerText =
+        "Object selected: " + targetObject;
+
+      speak("Searching for " + targetObject);
+      return;
+    }
+
+    // Otherwise treat full sentence as object name
+    targetObject = command;
+    document.getElementById("uiTarget").innerText = targetObject;
+    speak("Object selected " + targetObject);
+  };
+};
+function captureFrame(){
+  const video = document.getElementById("video");
+  let canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  let ctx = canvas.getContext("2d");
+  ctx.drawImage(video, 0, 0);
+  return canvas.toDataURL("image/jpeg");
+}
+async function sendFrame() {
+  if (!targetObject) return;
+
+  let image = captureFrame();
+
+    let res = await fetch("https://nav-aid.onrender.com/detect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image })
+  });
+
+  let data = await res.json();
+  drawBoxes(data.detections);
+
+  let videoWidth = document.getElementById("video").videoWidth;
+  let found = data.detections.find(det =>
+    det.label.toLowerCase().includes(targetObject)
+  );
+
+  if (found) {
+    lastFoundTime = Date.now(); // reset timer when found
+
+    let [x1, y1, x2, y2] = found.bbox;
+    let centerX = (x1 + x2) / 2;
+
+    let direction =
+      centerX < videoWidth * 0.33 ? "on your left side" :
+      centerX > videoWidth * 0.66 ? "on your right side" :
+      "in front of you";
+
+    let height = Math.abs(y2 - y1);
+    let distanceMeters = (480 / height).toFixed(1);
+
+    let msg = `${found.label} found ${direction}, ${distanceMeters} meters away`;
+
+    if (!cooldown) {
+      speak(msg);
+      cooldown = true;
+      setTimeout(() => (cooldown = false), 1200);
+    }
+
+    document.getElementById("status-box").innerText = msg;
+  } else {
+    // Speak after 30 seconds if not found
+    if (Date.now() - lastFoundTime > 30000) {
+      speak(`Object ${targetObject} not found, move to next area`);
+      lastFoundTime = Date.now(); // prevent repeat every frame
+    }
+
+    document.getElementById("status-box").innerText = "Searching...";
+  }
+}
+function drawBoxes(detections){
+  const video=document.getElementById("video");
+  const canvas=document.getElementById("canvas");
+  const ctx=canvas.getContext("2d");
+
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  detections.forEach(det=>{
+    let [x1,y1,x2,y2]=det.bbox;
+    ctx.strokeStyle="#00ff00";
+    ctx.lineWidth=3;
+    ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+    ctx.fillStyle="lime";
+    ctx.font="16px Poppins";
+    ctx.fillText(det.label,x1+3,y1-6);
+  });
+}
+
+function startScanning(){
+  scanning = true;
+  setScanningUI(true);
+  lastFoundTime = Date.now();   // reset timer when scanning starts
+  clearInterval(intervalId);
+  intervalId = setInterval(() => {
+    if (scanning) sendFrame();
+  }, 900);
+}
+
+
+function stopScanning(){
+  scanning=false;
+  clearInterval(intervalId);
+  cooldown=false;
+  setScanningUI(false);
+  speak("Scanning stopped");
+  document.getElementById("status-box").innerText="Scanning stopped";
+}
+
+document.getElementById("start-scan").onclick = () => {
+  if(!targetObject){
+    speak("Please say an object first");
+    return;
+  }
+  speak("Starting scanning");
+  startScanning();
+};
+
+document.getElementById("stop-scan").onclick = stopScanning;
+</script>
+</body>
+</html>

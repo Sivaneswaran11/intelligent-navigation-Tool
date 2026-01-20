@@ -1,0 +1,1214 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intelligent Navigation Aid</title>
+
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            margin: 0;
+            background: #0f0f0f;
+            color: white;
+            font-family: 'Poppins', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            margin-top: 15px;
+            font-size: 28px;
+            color: #00eaff;
+            text-shadow: 0 0 10px #00eaff;
+        }
+
+        #camera-box {
+            position: relative;
+            width: 90%;
+            max-width: 420px;
+            margin-top: 20px;
+        }
+
+        video, canvas {
+            width: 100%;
+            border-radius: 12px;
+        }
+
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            width: 90%;
+            max-width: 420px;
+            gap: 12px;
+        }
+
+        button {
+            padding: 15px;
+            font-size: 18px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        #start-voice { background: #ff2a6d; color: white; }
+        #start-scan { background: #00eaff; color: black; }
+        #stop-scan { background: #ff8800; color: black; }
+
+        #status-box {
+            margin-top: 20px;
+            padding: 12px;
+            width: 90%;
+            max-width: 420px;
+            font-size: 18px;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            border: 2px solid #00eaff;
+        }
+
+        #log {
+            margin-top: 15px;
+            width: 90%;
+            max-width: 420px;
+            background: #111;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 13px;
+            color: #9f9f9f;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>Intelligent Navigation Tool</h1>
+
+<div id="camera-box">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+</div>
+
+<div id="controls">
+    <button id="start-voice">🎤 Speak Object</button>
+    <button id="start-scan">▶ Start Scanning</button>
+    <button id="stop-scan">⏹ Stop Scanning</button>
+</div>
+
+<div id="status-box">Say an object name</div>
+
+<pre id="log"></pre>
+
+<script>
+
+//// CAMERA SETUP ////
+async function startCamera() {
+    const video = document.getElementById("video");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+}
+startCamera();
+
+let targetObject = "";
+let scanning = false;
+let intervalId = null;
+
+function speak(text) {
+    window.speechSynthesis.cancel();   // stop old voice
+    let msg = new SpeechSynthesisUtterance(text);
+    msg.lang = "en-US";
+    window.speechSynthesis.speak(msg);
+}
+
+//// SPEECH INPUT ////
+document.getElementById("start-voice").onclick = () => {
+    let rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    rec.lang = "en-US";
+    rec.start();
+
+    rec.onresult = (event) => {
+        let command = event.results[0][0].transcript.toLowerCase();
+        console.log("VOICE:", command);
+
+        /////// STOP SCANNING //////
+        if (command.includes("stop")) {
+            clearInterval(intervalId);
+            scanning = false;
+            window.speechSynthesis.cancel();
+            speak("Scanning stopped");
+            document.getElementById("status-box").innerText = "Scanning stopped";
+            return;
+        }
+
+        /////// START SCANNING (VOICE COMMAND) //////
+        if (command.includes("start scanning") || command.includes("start")) {
+            if (targetObject === "") {
+                speak("Please say an object first");
+                return;
+            }
+            speak("Starting scanning");
+            scanning = true;
+            startScanLoop();
+            return;
+        }
+
+        /////// OBJECT NAME CAPTURE ///////
+        targetObject = command;
+        speak("Searching for " + targetObject);
+        document.getElementById("status-box").innerText = "Searching for: " + targetObject;
+    };
+};
+
+//// FRAME CAPTURE ////
+function captureFrame() {
+    const video = document.getElementById("video");
+    let canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    let ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+    return canvas.toDataURL("image/jpeg");
+}
+
+//// SEND TO BACKEND ////
+async function sendFrame() {
+    if (!targetObject) return;
+
+    let image = captureFrame();
+
+    let res = await fetch("http://127.0.0.1:5000/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: image })
+    });
+
+    let data = await res.json();
+    document.getElementById("log").innerText = JSON.stringify(data, null, 2);
+
+    drawBoxes(data.detections);
+
+    let found = data.detections.find(det =>
+        det.label.toLowerCase().includes(targetObject)
+    );
+
+    if (found) {
+        let msg = `${found.label} found ${found.distance} on your ${found.direction}`;
+        speak(msg);
+        document.getElementById("status-box").innerText = msg;
+    } else {
+        document.getElementById("status-box").innerText = "Object not found";
+    }
+}
+
+//// DRAW BOXES ////
+function drawBoxes(detections) {
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    detections.forEach(det => {
+        if (!det.bbox) return;
+
+        let [x1, y1, x2, y2] = det.bbox;
+        ctx.strokeStyle = "#00ff00";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+        ctx.fillStyle = "lime";
+        ctx.font = "16px Poppins";
+        ctx.fillText(det.label, x1 + 3, y1 - 5);
+    });
+}
+
+//// START SCANNING LOOP ////
+function startScanLoop() {
+    clearInterval(intervalId);
+    intervalId = setInterval(() => {
+        if (scanning) sendFrame();
+    }, 1000);
+}
+
+//// BUTTON SCANNING ////
+document.getElementById("start-scan").onclick = () => {
+    if (targetObject === "") {
+        speak("Please say an object first");
+        return;
+    }
+    speak("Starting scanning");
+    scanning = true;
+    startScanLoop();
+};
+
+document.getElementById("stop-scan").onclick = () => {
+    clearInterval(intervalId);
+    scanning = false;
+    window.speechSynthesis.cancel();
+    speak("Scanning stopped");
+    document.getElementById("status-box").innerText = "Scanning stopped";
+};
+
+</script>
+</body>
+</html>
+
+
+
+
+
+
+new code
+
+
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intelligent Navigation Aid</title>
+
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            margin: 0;
+            background: #0f0f0f;
+            color: white;
+            font-family: 'Poppins', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            margin-top: 15px;
+            font-size: 28px;
+            color: #00eaff;
+            text-shadow: 0 0 10px #00eaff;
+        }
+
+        #camera-box {
+            position: relative;
+            width: 90%;
+            max-width: 420px;
+            margin-top: 20px;
+        }
+
+        video, canvas {
+            width: 100%;
+            border-radius: 12px;
+        }
+
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            width: 90%;
+            max-width: 420px;
+            gap: 12px;
+        }
+
+        button {
+            padding: 15px;
+            font-size: 18px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        #start-voice { background: #ff2a6d; color: white; }
+        #start-scan { background: #00eaff; color: black; }
+        #stop-scan { background: #ff8800; color: black; }
+
+        #status-box {
+            margin-top: 20px;
+            padding: 12px;
+            width: 90%;
+            max-width: 420px;
+            font-size: 18px;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            border: 2px solid #00eaff;
+        }
+
+        #log {
+            margin-top: 15px;
+            width: 90%;
+            max-width: 420px;
+            background: #111;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 13px;
+            color: #9f9f9f;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>Intelligent Navigation Aid</h1>
+
+<div id="camera-box">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+</div>
+
+<div id="controls">
+    <button id="start-voice">🎤 Speak Object</button>
+    <button id="start-scan">▶ Start Scanning</button>
+    <button id="stop-scan">⏹ Stop Scanning</button>
+</div>
+
+<div id="status-box">Say an object name</div>
+
+<pre id="log"></pre>
+<script>
+
+//// CAMERA SETUP ////
+async function startCamera() {
+    const video = document.getElementById("video");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+}
+startCamera();
+
+let targetObject = "";
+let scanning = false;
+let intervalId = null;
+
+function speak(text) {
+    window.speechSynthesis.cancel();  
+    let msg = new SpeechSynthesisUtterance(text);
+    msg.lang = "en-US";
+    window.speechSynthesis.speak(msg);
+}
+
+//// --- FIXED VOICE COMMAND SYSTEM --- ////
+document.getElementById("start-voice").onclick = () => {
+    let rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    rec.lang = "en-US";
+    rec.start();
+
+    rec.onresult = (event) => {
+        let command = event.results[0][0].transcript.toLowerCase().trim();
+        console.log("VOICE:", command);
+
+        // STOP
+        if (command.includes("stop scanning") || command === "stop") {
+            stopScanning();
+            return;
+        }
+
+        // STRONG MATCH FOR START SCANNING (fixed)
+        if (
+            command === "start scanning" ||
+            command === "start" ||
+            command.includes("begin scanning") ||
+            command.includes("scan now")
+        ) {
+            if (!targetObject){
+                speak("Please say an object name first.");
+                return;
+            }
+            speak("Starting scanning");
+            startScanning();
+            return;
+        }
+
+        // Otherwise treat as object name
+        targetObject = command;
+        speak("Object selected " + targetObject);
+        document.getElementById("status-box").innerText =
+            "Object selected: " + targetObject;
+    };
+};
+
+//// FRAME CAPTURE ////
+function captureFrame() {
+    const video = document.getElementById("video");
+    let canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    let ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+
+    return canvas.toDataURL("image/jpeg");
+}
+
+//// SEND TO BACKEND ////
+async function sendFrame() {
+    if (!targetObject) return;
+
+    let image = captureFrame();
+
+    let res = await fetch("http://127.0.0.1:5000/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: image })
+    });
+
+    let data = await res.json();
+    document.getElementById("log").innerText = JSON.stringify(data, null, 2);
+
+    drawBoxes(data.detections);
+
+    let videoWidth = document.getElementById("video").videoWidth;
+
+    let found = data.detections.find(det =>
+        det.label.toLowerCase().includes(targetObject)
+    );
+
+    if (found) {
+        // ---------- FIXED DIRECTION ----------
+        let [x1, y1, x2, y2] = found.bbox;
+        let centerX = (x1 + x2) / 2;
+
+        let direction = "center";
+        if (centerX < videoWidth * 0.33) direction = "left";
+        else if (centerX > videoWidth * 0.66) direction = "right";
+        else direction = "center";
+
+        // ---------- FIXED DISTANCE ----------
+        let height = Math.abs(y2 - y1);
+        let distanceMeters = (450 / height).toFixed(2); // tuned constant
+
+        let msg = `${found.label} found ${distanceMeters} meters on your ${direction}`;
+        speak(msg);
+        document.getElementById("status-box").innerText = msg;
+
+    } else {
+        document.getElementById("status-box").innerText = "Object not found";
+    }
+}
+
+//// DRAW BOXES ////
+function drawBoxes(detections) {
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    detections.forEach(det => {
+        if (!det.bbox) return;
+
+        let [x1, y1, x2, y2] = det.bbox;
+        ctx.strokeStyle = "#00ff00";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+        ctx.fillStyle = "lime";
+        ctx.font = "16px Poppins";
+        ctx.fillText(det.label, x1 + 3, y1 - 5);
+    });
+}
+
+//// START SCANNING ////
+function startScanning() {
+    scanning = true;
+    clearInterval(intervalId);
+    intervalId = setInterval(() => {
+        if (scanning) sendFrame();
+    }, 900);
+}
+
+//// STOP SCANNING ////
+function stopScanning() {
+    scanning = false;
+    clearInterval(intervalId);
+    window.speechSynthesis.cancel();
+    speak("Scanning stopped");
+    document.getElementById("status-box").innerText = "Scanning stopped";
+}
+
+//// BUTTON HANDLERS ////
+document.getElementById("start-scan").onclick = () => {
+    if (!targetObject) {
+        speak("Please say an object first");
+        return;
+    }
+    speak("Starting scanning");
+    startScanning();
+};
+
+document.getElementById("stop-scan").onclick = stopScanning;
+
+</script>
+</body>
+</html>
+
+
+
+
+
+
+
+correct new code
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intelligent Navigation Aid</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            margin: 0;
+            background: #0f0f0f;
+            color: white;
+            font-family: 'Poppins', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            margin-top: 15px;
+            font-size: 28px;
+            color: #00eaff;
+            text-shadow: 0 0 10px #00eaff;
+        }
+
+        #camera-box {
+            position: relative;
+            width: 90%;
+            max-width: 420px;
+            margin-top: 20px;
+        }
+
+        video, canvas {
+            width: 100%;
+            border-radius: 12px;
+        }
+
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            width: 90%;
+            max-width: 420px;
+            gap: 12px;
+        }
+
+        button {
+            padding: 15px;
+            font-size: 18px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        #start-voice { background: #ff2a6d; color: white; }
+        #start-scan { background: #00eaff; color: black; }
+        #stop-scan { background: #ff8800; color: black; }
+
+        #status-box {
+            margin-top: 20px;
+            padding: 12px;
+            width: 90%;
+            max-width: 420px;
+            font-size: 18px;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            border: 2px solid #00eaff;
+        }
+
+        #log {
+            margin-top: 15px;
+            width: 90%;
+            max-width: 420px;
+            background: #111;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 13px;
+            color: #9f9f9f;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>Intelligent Navigation Aid</h1>
+
+<div id="camera-box">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+</div>
+
+<div id="controls">
+    <button id="start-voice">🎤 Speak Object</button>
+    <button id="start-scan">▶ Start Scanning</button>
+    <button id="stop-scan">⏹ Stop Scanning</button>
+</div>
+
+<div id="status-box">Say an object name</div>
+
+<pre id="log"></pre>
+
+
+<script>
+
+//// CAMERA SETUP ////
+async function startCamera() {
+    const video = document.getElementById("video");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+}
+startCamera();
+
+
+let targetObject = "";
+let scanning = false;
+let intervalId = null;
+let cooldown = false;   // prevents fast repeated voice messages
+
+
+function speak(text) {
+    window.speechSynthesis.cancel();
+    let msg = new SpeechSynthesisUtterance(text);
+    msg.lang = "en-US";
+    window.speechSynthesis.speak(msg);
+}
+
+
+//// VOICE COMMAND HANDLING ////
+document.getElementById("start-voice").onclick = () => {
+    let rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    rec.lang = "en-US";
+    rec.start();
+
+    rec.onresult = (event) => {
+        let command = event.results[0][0].transcript.toLowerCase().trim();
+        console.log("VOICE:", command);
+
+        // STOP EVERYTHING
+        if (command.includes("stop scanning") || command === "stop") {
+            stopScanning();
+            return;
+        }
+
+        // START SCANNING
+        if (
+            command.includes("start scanning") ||
+            command === "start" ||
+            command.includes("begin scanning")
+        ) {
+            if (!targetObject) {
+                speak("Please say an object name first");
+                return;
+            }
+            speak("Starting scanning");
+            startScanning();
+            return;
+        }
+
+        // OTHERWISE = OBJECT NAME
+        targetObject = command;
+        speak("Object selected " + targetObject);
+        document.getElementById("status-box").innerText =
+            "Object selected: " + targetObject;
+    };
+};
+
+
+
+//// FRAME CAPTURE ////
+function captureFrame() {
+    const video = document.getElementById("video");
+    let canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    let ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+
+    return canvas.toDataURL("image/jpeg");
+}
+
+
+
+//// SEND FRAME TO SERVER ////
+async function sendFrame() {
+    if (!targetObject) return;
+
+    let image = captureFrame();
+
+    let res = await fetch("http://127.0.0.1:5000/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: image })
+    });
+
+    let data = await res.json();
+    document.getElementById("log").innerText = JSON.stringify(data, null, 2);
+
+    drawBoxes(data.detections);
+
+    let videoWidth = document.getElementById("video").videoWidth;
+
+
+    let found = data.detections.find(det =>
+        det.label.toLowerCase().includes(targetObject)
+    );
+
+    if (found) {
+
+        // CALCULATE DIRECTION
+        let [x1, y1, x2, y2] = found.bbox;
+        let centerX = (x1 + x2) / 2;
+
+        let direction = "center";
+        if (centerX < videoWidth * 0.33) direction = "left";
+        else if (centerX > videoWidth * 0.66) direction = "right";
+
+        // CALCULATE DISTANCE (IMPROVED)
+        let height = Math.abs(y2 - y1);
+        let distanceMeters = (500 / height).toFixed(1);
+
+        let msg = `${found.label} found ${distanceMeters} meters on your ${direction}`;
+
+        // cooldown prevents overlapping repeated speaking
+        if (!cooldown) {
+            speak(msg);
+            cooldown = true;
+            setTimeout(() => cooldown = false, 1200); // 1.2-sec cooldown
+        }
+
+        document.getElementById("status-box").innerText = msg;
+    } else {
+        document.getElementById("status-box").innerText = "Object not found";
+    }
+}
+
+
+
+//// DRAW BOUNDING BOX ////
+function drawBoxes(detections) {
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    detections.forEach(det => {
+        if (!det.bbox) return;
+
+        let [x1, y1, x2, y2] = det.bbox;
+        ctx.strokeStyle = "#00ff00";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+        ctx.fillStyle = "lime";
+        ctx.font = "16px Poppins";
+        ctx.fillText(det.label, x1 + 3, y1 - 8);
+    });
+}
+
+
+
+//// START SCANNING ////
+function startScanning() {
+    scanning = true;
+    clearInterval(intervalId);
+    intervalId = setInterval(() => {
+        if (scanning) sendFrame();
+    }, 900);
+}
+
+
+
+//// STOP SCANNING ////
+function stopScanning() {
+    scanning = false;
+    clearInterval(intervalId);
+    cooldown = false;
+    window.speechSynthesis.cancel();
+    speak("Scanning stopped");
+    document.getElementById("status-box").innerText = "Scanning stopped";
+}
+
+
+
+//// BUTTON HANDLERS ////
+document.getElementById("start-scan").onclick = () => {
+    if (!targetObject) {
+        speak("Please say an object first");
+        return;
+    }
+    speak("Starting scanning");
+    startScanning();
+};
+
+document.getElementById("stop-scan").onclick = stopScanning;
+
+</script>
+
+</body>
+</html>
+
+
+
+
+
+
+
+last update code
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intelligent Navigation Aid</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            margin: 0;
+            background: #0f0f0f;
+            color: white;
+            font-family: 'Poppins', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            margin-top: 15px;
+            font-size: 28px;
+            color: #00eaff;
+            text-shadow: 0 0 10px #00eaff;
+        }
+
+        #camera-box {
+            position: relative;
+            width: 90%;
+            max-width: 420px;
+            margin-top: 20px;
+        }
+
+        video, canvas {
+            width: 100%;
+            border-radius: 12px;
+        }
+
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            width: 90%;
+            max-width: 420px;
+            gap: 12px;
+        }
+
+        button {
+            padding: 15px;
+            font-size: 18px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        #start-voice { background: #ff2a6d; color: white; }
+        #start-scan { background: #00eaff; color: black; }
+        #stop-scan { background: #ff8800; color: black; }
+
+        #status-box {
+            margin-top: 20px;
+            padding: 12px;
+            width: 90%;
+            max-width: 420px;
+            font-size: 18px;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            border: 2px solid #00eaff;
+        }
+
+        #log {
+            margin-top: 15px;
+            width: 90%;
+            max-width: 420px;
+            background: #111;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 13px;
+            color: #9f9f9f;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>Intelligent Navigation Aid</h1>
+
+<div id="camera-box">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+</div>
+
+<div id="controls">
+    <button id="start-voice">🎤 Speak Object</button>
+    <button id="start-scan">▶ Start Scanning</button>
+    <button id="stop-scan">⏹ Stop Scanning</button>
+</div>
+
+<div id="status-box">Say an object name</div>
+
+<pre id="log"></pre>
+
+
+<script>
+
+//// CAMERA SETUP ////
+async function startCamera() {
+    const video = document.getElementById("video");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+}
+startCamera();
+
+
+let targetObject = "";
+let scanning = false;
+let intervalId = null;
+let cooldown = false;   // prevents fast repeated voice messages
+
+
+function speak(text) {
+    window.speechSynthesis.cancel();
+    let msg = new SpeechSynthesisUtterance(text);
+    msg.lang = "en-US";
+    window.speechSynthesis.speak(msg);
+}
+
+
+//// VOICE COMMAND HANDLING ////
+document.getElementById("start-voice").onclick = () => {
+    let rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    rec.lang = "en-US";
+    rec.start();
+
+    rec.onresult = (event) => {
+        let command = event.results[0][0].transcript.toLowerCase().trim();
+        console.log("VOICE:", command);
+
+        // STOP EVERYTHING
+        if (command.includes("stop scanning") || command === "stop") {
+            stopScanning();
+            return;
+        }
+
+        // START SCANNING
+        if (
+            command.includes("start scanning") ||
+            command === "start" ||
+            command.includes("begin scanning")
+        ) {
+            if (!targetObject) {
+                speak("Please say an object name first");
+                return;
+            }
+            speak("Starting scanning");
+            startScanning();
+            return;
+        }
+
+        // OTHERWISE = OBJECT NAME
+        targetObject = command;
+        speak("Object selected " + targetObject);
+        document.getElementById("status-box").innerText =
+            "Object selected: " + targetObject;
+    };
+};
+
+
+
+//// FRAME CAPTURE ////
+function captureFrame() {
+    const video = document.getElementById("video");
+    let canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    let ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+
+    return canvas.toDataURL("image/jpeg");
+}
+
+
+
+//// SEND FRAME TO SERVER ////
+async function sendFrame() {
+    if (!targetObject) return;
+
+    let image = captureFrame();
+
+    let res = await fetch("http://127.0.0.1:5000/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: image })
+    });
+
+    let data = await res.json();
+    document.getElementById("log").innerText = JSON.stringify(data, null, 2);
+
+    drawBoxes(data.detections);
+
+    let videoWidth = document.getElementById("video").videoWidth;
+
+    let found = data.detections.find(det =>
+        det.label.toLowerCase().includes(targetObject)
+    );
+
+    if (found) {
+        // GET COORDINATES
+        let [x1, y1, x2, y2] = found.bbox;
+
+        // DIRECTION CALCULATION
+        let centerX = (x1 + x2) / 2;
+        let direction = "center";
+
+        if (centerX < videoWidth * 0.33) direction = "left";
+        else if (centerX > videoWidth * 0.66) direction = "right";
+
+        // DISTANCE CALCULATION
+        let height = Math.abs(y2 - y1);
+        let distanceMeters = (480 / height).toFixed(1);
+
+        // EXACT REQUIRED FORMAT
+        let directionText =
+            direction === "left"
+                ? "on your left side"
+                : direction === "right"
+                ? "on your right side"
+                : "in front of you";
+
+        let msg = `${found.label} found ${directionText}, ${distanceMeters} meters away`;
+
+        // SPEAK WITH COOLDOWN
+        if (!cooldown) {
+            speak(msg);
+            cooldown = true;
+            setTimeout(() => (cooldown = false), 1200);
+        }
+
+        document.getElementById("status-box").innerText = msg;
+    } else {
+        document.getElementById("status-box").innerText = "Object not found";
+    }
+}
+//// DRAW BOUNDING BOX ////
+function drawBoxes(detections) {
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    detections.forEach(det => {
+        if (!det.bbox) return;
+
+        let [x1, y1, x2, y2] = det.bbox;
+        ctx.strokeStyle = "#00ff00";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+        ctx.fillStyle = "lime";
+        ctx.font = "16px Poppins";
+        ctx.fillText(det.label, x1 + 3, y1 - 8);
+    });
+}
+
+
+
+//// START SCANNING ////
+function startScanning() {
+    scanning = true;
+    clearInterval(intervalId);
+    intervalId = setInterval(() => {
+        if (scanning) sendFrame();
+    }, 900);
+}
+
+
+
+//// STOP SCANNING ////
+function stopScanning() {
+    scanning = false;
+    clearInterval(intervalId);
+    cooldown = false;
+    window.speechSynthesis.cancel();
+    speak("Scanning stopped");
+    document.getElementById("status-box").innerText = "Scanning stopped";
+}
+
+
+
+//// BUTTON HANDLERS ////
+document.getElementById("start-scan").onclick = () => {
+    if (!targetObject) {
+        speak("Please say an object first");
+        return;
+    }
+    speak("Starting scanning");
+    startScanning();
+};
+
+document.getElementById("stop-scan").onclick = stopScanning;
+
+</script>
+
+</body>
+</html>
+
+
